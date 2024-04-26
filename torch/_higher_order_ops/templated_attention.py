@@ -251,23 +251,6 @@ def templated_attention_fake_tensor_mode(
         return torch.empty_like(query, memory_format=torch.contiguous_format), logsumexp
 
 
-def is_fake_tensor(t: torch.Tensor):
-    """Why not use is_fake in fake_tensor?
-
-    That is specifically designed to pick up on traceable wrapper subclasses so instead we
-    define this one off
-    """
-    from torch._subclasses.fake_tensor import FakeTensor
-    from torch._subclasses.functional_tensor import FunctionalTensor
-
-    return (
-        isinstance(t, torch.Tensor)
-        and isinstance(t, FunctionalTensor)
-        and torch._is_functional_tensor(t.elem)
-        and isinstance(torch._from_functional_tensor(t.elem), FakeTensor)
-    )
-
-
 # ---------------------------- Autograd Implementation ----------------------------
 def create_fw_bw_graph(score_mod, index_values, other_buffers):
     # See Note:[HOP create fw_bw graph]
@@ -275,6 +258,7 @@ def create_fw_bw_graph(score_mod, index_values, other_buffers):
     # All of these imports need to be here in order to avoid circular dependencies
     from torch._dispatch.python import suspend_functionalization
     from torch._functorch.aot_autograd import AOTConfig, create_joint
+    from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 
     from torch._subclasses.functional_tensor import disable_functional_mode
     from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
@@ -287,15 +271,6 @@ def create_fw_bw_graph(score_mod, index_values, other_buffers):
         num_params_buffers=0,
         aot_id=0,
         keep_inference_input_mutations=False,
-    )
-    assert all(is_fake_tensor(t) for t in index_values), (
-        "Expected all index_values to create_fw_bw_graph to be FakeTensors! ",
-        "Ensure that FlexAttention was called with backend >= aot_eager",
-    )
-
-    assert all(is_fake_tensor(t) for t in other_buffers), (
-        "Expected all other_buffers to create_fw_bw_graph to be FakeTensors! ",
-        "Ensure that FlexAttention was called with backend >= aot_eager",
     )
 
     with suspend_functionalization(), disable_functional_mode():
@@ -310,8 +285,21 @@ def create_fw_bw_graph(score_mod, index_values, other_buffers):
                     requires_grad=t.requires_grad,
                 )
 
-            unwrapped_score_mod_indexes = pytree.tree_map(_from_fun, index_values)
-            unwrapped_other_buffers = pytree.tree_map(_from_fun, other_buffers)
+            # If someone runs this hop under the default compiler backend ("eager")
+            # Then this path will be run with the actual user inputs. We convert them
+            # to fake tensors in order to not perform any actual compute.
+            from torch._guards import detect_fake_mode
+
+            fake_mode = detect_fake_mode(index_values)
+            if fake_mode is None:
+                fake_mode = FakeTensorMode(allow_non_fake_inputs=True)
+
+            with fake_mode:
+                unwrapped_score_mod_indexes = pytree.tree_map(_from_fun, index_values)
+                unwrapped_other_buffers = pytree.tree_map(_from_fun, other_buffers)
+
+            assert all(isinstance(t, FakeTensor) for t in unwrapped_score_mod_indexes)
+            assert all(isinstance(t, FakeTensor) for t in unwrapped_other_buffers)
 
             example_flat_out = pytree.tree_map(
                 _from_fun,

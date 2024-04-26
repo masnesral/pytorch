@@ -455,7 +455,10 @@ class TestTemplatedSDPA(InductorTestCase):
 
     @supported_platform
     @common_utils.parametrize("score_mod_name", ["_head_offset", "_buffer_reduced"])
-    def test_captured_score_mod_aot_eager_gradcheck(self, score_mod_name: str):
+    @common_utils.parametrize("mode", ["eager", "aot_eager"])
+    def test_captured_score_mod_aot_eager_gradcheck(
+        self, score_mod_name: str, mode: str
+    ):
         make_tensor = functools.partial(
             torch.randn,
             (2, 2, 8, 4),
@@ -465,7 +468,7 @@ class TestTemplatedSDPA(InductorTestCase):
         )
         query, key, value = make_tensor(), make_tensor(), make_tensor()
 
-        func = torch.compile(_templated_attention, backend="aot_eager", fullgraph=True)
+        func = torch.compile(_templated_attention, backend=mode, fullgraph=True)
         score_mod = captured_buffers_map[score_mod_name](torch.float64)
 
         self.assertTrue(
