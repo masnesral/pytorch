@@ -498,9 +498,9 @@ def _export_non_strict(
     # state change in the autograd global state and error. If the user is exporting under inference
     # mode, we don't care.
     is_grad_enabled = torch._C.is_grad_enabled()
-    grad_safe_guard = (
-        AutogradStateOpsFailSafeguard() if is_grad_enabled else nullcontext()
-    )
+    grad_safe_guard = nullcontext()
+    if not pre_dispatch and is_grad_enabled:
+        grad_safe_guard = AutogradStateOpsFailSafeguard()
 
     @contextmanager
     def _compiling_state_context():
