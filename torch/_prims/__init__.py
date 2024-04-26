@@ -270,14 +270,14 @@ def _make_prim(
     meta: Callable,
     impl_aten: Callable,
     doc: str,
+    mutates_args: Sequence[str] = (),
+    returns_alias: bool = False,
     tags: Optional[Sequence[torch.Tag]] = None,
 ):
     """
     Creates a primitive operation.
 
     """
-
-    prim.define(schema, tags=torch.Tag.pt2_compliant_tag)
 
     def _prim_impl(*args, **kwargs):
         # always run the meta function because aten implementation will
@@ -302,9 +302,24 @@ def _make_prim(
             return _prim_impl(*args, **kwargs)
 
     name = schema.split("(")[0]
-    prim_impl.impl(name, _prim_impl)
-    prim_autograd_impl.impl(name, _autograd_impl)
-    prim_meta_impl.impl(name, meta)
+    schema = schema[len(name) :]
+
+    # if op returns views/aliases of inputs or other returns, we need to use the
+    # old custom ops API
+
+    if returns_alias:
+        prim.define(name + schema, tags=torch.Tag.pt2_compliant_tag)
+        prim_impl.impl(name, _prim_impl)
+        prim_autograd_impl.impl(name, _autograd_impl)
+        prim_meta_impl.impl(name, meta)
+    else:
+        prim_def = torch.library.custom_op(
+            "prims::" + name,
+            _prim_impl,
+            mutates_args=mutates_args,
+            schema=schema,
+        )
+        prim_def.register_fake(meta)
 
     _prim_packet = getattr(torch._ops.ops.prims, name)
     _prim = _prim_packet.default
@@ -1206,10 +1221,12 @@ _as_strided_doc = """
 
 as_strided = _make_prim(
     schema="as_strided(Tensor(a!) a, SymInt[] size, SymInt[] stride, SymInt storage_offset) -> Tensor(a!)",
+    mutates_args=("a",),
     meta=_as_strided_meta,
     impl_aten=_as_strided_aten,
     return_type=RETURN_TYPE.VIEW,
     doc=_as_strided_doc,
+    returns_alias=True,
 )
 
 
@@ -1301,6 +1318,7 @@ broadcast_in_dim = _make_prim(
     impl_aten=_broadcast_in_dim_aten,
     return_type=RETURN_TYPE.VIEW,
     doc=_broadcast_in_dim_doc,
+    returns_alias=True,
 )
 
 
@@ -1426,6 +1444,7 @@ collapse_view = _make_prim(
     impl_aten=_collapse_view_aten,
     return_type=RETURN_TYPE.VIEW,
     doc=_collapse_view_doc,
+    returns_alias=True,
 )
 
 
@@ -1576,6 +1595,7 @@ slice = _make_prim(
     impl_aten=_slice_aten,
     return_type=RETURN_TYPE.VIEW,
     doc=_slice_doc,
+    returns_alias=True,
 )
 
 
@@ -1705,6 +1725,7 @@ split_dim = _make_prim(
     impl_aten=_split_dim_aten,
     return_type=RETURN_TYPE.VIEW,
     doc=_split_dim_doc,
+    returns_alias=True,
 )
 
 
@@ -1779,6 +1800,7 @@ transpose = _make_prim(
     impl_aten=_transpose_aten,
     return_type=RETURN_TYPE.VIEW,
     doc=_transpose_doc,
+    returns_alias=True,
 )
 
 
@@ -1968,7 +1990,7 @@ def _reshape_meta(a: TensorLikeType, shape: ShapeType):
 
 
 def _reshape_aten(a: Tensor, shape: ShapeType) -> Tensor:
-    return a.reshape(shape).contiguous().clone()
+    return a.reshape(shape).contiguous()
 
 
 _reshape_doc = """
@@ -2229,10 +2251,12 @@ _copy_to_doc = """
 # TODO: Remove safe casting and implement on reference instead
 copy_to = _make_prim(
     schema="copy_to(Tensor(a!) a, Tensor b) -> Tensor(a!)",
+    mutates_args=("a",),
     meta=_copy_to_meta,
     impl_aten=_copy_to_aten,
     return_type=RETURN_TYPE.INPLACE,
     doc=_copy_to_doc,
+    returns_alias=True,
 )
 
 
@@ -2292,6 +2316,7 @@ _resize_doc = """
 # TODO: review support arbitrary resizes
 resize = _make_prim(
     schema="resize(Tensor(a!) a, SymInt[] shape) -> Tensor(a!)",
+    mutates_args=("a",),
     meta=_resize_meta,
     impl_aten=_resize_aten,
     return_type=RETURN_TYPE.INPLACE,
@@ -2316,7 +2341,7 @@ def _reduction_meta(inp, dims, *, output_dtype=None):
     )
 
 
-def _var_reduction_meta(inp, dims, *, correction):
+def _var_reduction_meta(inp, dims, correction):
     if utils.is_complex_dtype(inp.dtype):
         output_dtype = utils.corresponding_real_dtype(inp.dtype)
     else:
@@ -2363,7 +2388,7 @@ def _make_reduction_prim(name: str, impl_aten, doc):
 def _make_var_reduction_prim(name: str, impl_aten, doc):
     """Creates a reduction prim."""
     return _make_prim(
-        schema=f"{name}(Tensor inp, int[]? dims, *, float correction, ScalarType? output_dtype=None) -> Tensor",
+        schema=f"{name}(Tensor inp, int[]? dims, float? correction=1, *, ScalarType? output_dtype=None) -> Tensor",
         meta=_var_reduction_meta,
         impl_aten=impl_aten,
         return_type=RETURN_TYPE.NEW,
@@ -2415,9 +2440,15 @@ prod = _make_reduction_prim(
     doc=_prod_doc,
 )
 
+
+# torch.var, but correction is not kwarg-only
+def torch_var(input, dim=None, correction=1, **kwargs):
+    return torch.var(input, dim=dim, correction=correction, **kwargs)
+
+
 var = _make_var_reduction_prim(
     name="var",
-    impl_aten=torch.var,
+    impl_aten=torch_var,
     doc=_var_doc,
 )
 
